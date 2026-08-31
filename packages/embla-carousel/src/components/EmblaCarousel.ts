@@ -67,6 +67,7 @@ function EmblaCarousel(
   let slides: HTMLElement[]
 
   function cloneEngine(userOptions?: EmblaOptionsType): EngineType {
+    // Public API: safe during asyncInit before the first engine exists.
     if (!engine) return engine
     const engineOptions = mergeOptions(options, userOptions)
     return createEngine(engineOptions, container, slides, true)
@@ -81,7 +82,7 @@ function EmblaCarousel(
     const ssrOptions = isSsr ? { direction: 'ltr' } : {}
     const engineOptions = mergeOptions(options, ssrOptions)
     const rects = nodeHandler.getRects(container, slides, useCachedRects)
-    const engine = Engine(
+    const newEngine = Engine(
       root,
       container,
       slides,
@@ -92,11 +93,20 @@ function EmblaCarousel(
       isSsr
     )
 
-    if (options.loop && !engine.slideLooper.canLoop()) {
-      return cloneEngine({ loop: false })
+    // Upstream fallback: when content can't sustain loop, rebuild without it.
+    // Do NOT call cloneEngine here — it reads the outer `engine` binding, which
+    // is still unset during the first createEngine, and would return undefined
+    // (breaking asyncInit: SsrHandler then throws on `engine.axis`).
+    if (options.loop && !newEngine.slideLooper.canLoop()) {
+      return createEngine(
+        mergeOptions(options, { loop: false }),
+        container,
+        slides,
+        useCachedRects
+      )
     }
 
-    return engine
+    return newEngine
   }
 
   function initializeEngine(ownerWindow: WindowType): void {
@@ -199,14 +209,24 @@ function EmblaCarousel(
     withOptions?: EmblaOptionsType,
     withPlugins?: EmblaPluginType[]
   ): void {
-    const event = eventHandler.createEvent('reinit', null)
     const startSnap = engine ? selectedSnap() : 0
     deActivate()
+    // Clear the destroyed engine so goTo/selectedSnap don't operate on it while
+    // asyncInit's ResizeObserver path is still pending.
+    engine = <EngineType>(<unknown>undefined)
     activate(mergeOptions({ startSnap }, withOptions), withPlugins)
-    event.emit()
+    // Sync activate creates the engine immediately; asyncInit emits `reinit`
+    // from the getRectsAsync callback once measurement settles.
+    if (engine) {
+      eventHandler.createEvent('reinit', null).emit()
+    }
   }
 
   function deActivate(): void {
+    // Always clear media listeners (incl. pending asyncInit ResizeObserver
+    // cleanup). Previously we returned early when `engine` was missing, which
+    // left getRectsAsync observers alive across reActivate and stacked inits.
+    mediaHandlers.clear()
     if (!engine) return
     engine.dragHandler.destroy()
     engine.resizeHandler.destroy()
@@ -215,7 +235,6 @@ function EmblaCarousel(
     engine.animation.destroy()
     pluginsHandler.destroy()
     engine.eventStore.clear()
-    mediaHandlers.clear()
     engine.translate.clear()
     engine.slideTranslates.forEach((translate) => translate.clear())
   }
@@ -227,7 +246,6 @@ function EmblaCarousel(
     const event = eventHandler.createEvent('destroy', null)
 
     destroyed = true
-    mediaHandlers.clear()
     deActivate()
     event.emit()
     eventHandler.clear()

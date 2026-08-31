@@ -25,7 +25,12 @@ function useEmblaCarousel(
   const storedOptions = useRef(options)
   const storedPlugins = useRef(plugins)
 
-  const serverApi = useRef(EmblaCarousel(null, options, plugins))
+  // IMPORTANT: never pass `plugins` into the SSR (null-root) instance.
+  // Plugin objects are stateful singletons; SSR init sets Autoplay's `isSsr=true`
+  // and leaves play()/stop() as permanent no-ops if that was the last init() —
+  // which happens whenever this hook remounts and reuses the same plugin
+  // instances from a parent useMemo (hero ImageCarousel, etc.).
+  const serverApi = useRef(EmblaCarousel(null, options))
   const [clientApi, setClientApi] = useState<EmblaCarouselType>()
   const [rootNode, setRootNode] = useState<HTMLElement>()
 

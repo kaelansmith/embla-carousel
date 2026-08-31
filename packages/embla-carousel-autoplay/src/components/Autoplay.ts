@@ -124,21 +124,33 @@ function Autoplay(userOptions: AutoplayOptionsType = {}): AutoplayType {
   }
 
   function destroy(): void {
-    if (!pluginIsActive()) return
+    if (destroyed) return
 
-    emblaApi
-      .off('pointerdown', onInteraction)
-      .off('pointerup', onInteraction)
-      .off('slidefocus', onInteraction)
+    // Always clean up — don't gate on pluginIsActive(). When `active` is toggled
+    // false before destroy (e.g. kit's old active:inView pattern), skipping
+    // cleanup left autoplayRunning/timers in a stuck state.
+    if (emblaApi) {
+      emblaApi
+        .off('pointerdown', onInteraction)
+        .off('pointerup', onInteraction)
+        .off('slidefocus', onInteraction)
+    }
 
-    stopAutoplay()
+    if (autoplayRunning) {
+      autoplayRunning = false
+      clearTimer()
+    }
     destroyed = true
-    autoplayRunning = false
   }
 
-  function setTimer(): void {
+  function setTimer(): boolean {
     const { ownerWindow } = emblaApi.internalEngine().nodeHandler
-    if (!ownerWindow) return
+    if (!ownerWindow) {
+      // Avoid stuck isPlaying=true with no timer (play/stop become no-ops).
+      autoplayRunning = false
+      timerStartTime = null
+      return false
+    }
 
     const startTime = new Date().getTime()
     const event = emblaApi.createEvent('autoplay:timerset', { startTime })
@@ -147,6 +159,7 @@ function Autoplay(userOptions: AutoplayOptionsType = {}): AutoplayType {
     timerId = ownerWindow.setTimeout(next, getDelay())
     timerStartTime = startTime
     event.emit()
+    return true
   }
 
   function clearTimer(): void {
@@ -162,10 +175,36 @@ function Autoplay(userOptions: AutoplayOptionsType = {}): AutoplayType {
     event.emit()
   }
 
+  function ensureDelay(): boolean {
+    const snapCount = emblaApi.snapList().length
+    if (snapCount <= 1) return false
+    // init() may have bailed before snaps were measurable (asyncInit / unloaded
+    // images). Rebuild delay on play once snaps exist.
+    if (!delay || delay.length !== snapCount) {
+      delay = normalizeDelay(emblaApi, options.delay)
+    }
+    return delay.length > 1
+  }
+
   function startAutoplay(): void {
-    if (!pluginIsActive()) return
+    if (!pluginIsActive()) {
+      autoplayRunning = false
+      timerStartTime = null
+      return
+    }
+    if (!ensureDelay()) {
+      // Don't claim to be playing when we can't arm a delay (common briefly
+      // during asyncInit / fade remeasure). Callers can retry via play()/reinit.
+      autoplayRunning = false
+      timerStartTime = null
+      return
+    }
     if (documentIsHidden()) {
+      // Remember intent to resume; never leave isPlaying=true with no timer
+      // (that makes subsequent play()/stop() look like no-ops).
       playOnDocumentVisible = true
+      autoplayRunning = false
+      timerStartTime = null
       return
     }
 
@@ -179,12 +218,15 @@ function Autoplay(userOptions: AutoplayOptionsType = {}): AutoplayType {
   }
 
   function stopAutoplay(): void {
-    if (!pluginIsActive()) return
-
+    // Don't gate on pluginIsActive() — same rationale as destroy(). When the
+    // plugin is destroyed/inactive, early returns left autoplayRunning=true
+    // with no timer, so later play()/stop() became no-ops.
     if (autoplayRunning) {
       autoplayRunning = false
-      const event = emblaApi.createEvent('autoplay:stop', null)
-      event.emit()
+      if (emblaApi) {
+        const event = emblaApi.createEvent('autoplay:stop', null)
+        event.emit()
+      }
     }
 
     clearTimer()
@@ -285,6 +327,14 @@ function Autoplay(userOptions: AutoplayOptionsType = {}): AutoplayType {
 
     if (kill) return stopAutoplay()
     startAutoplay()
+    // goToNext can briefly invalidate snap measurement (esp. with Fade +
+    // asyncInit). If we couldn't arm a timer, retry once after layout settles.
+    if (!timerStartTime && pluginIsActive()) {
+      const { ownerWindow } = emblaApi.internalEngine().nodeHandler
+      ownerWindow?.setTimeout(() => {
+        if (!destroyed && !timerStartTime) startAutoplay()
+      }, 100)
+    }
   }
 
   function getDelay(): number {
