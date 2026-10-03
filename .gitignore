@@ -49,3 +49,6 @@ coverage
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Turbo cache and logs
+.turbo/
